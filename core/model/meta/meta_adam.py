@@ -2,16 +2,12 @@
 
 import torch
 from torch import nn
-import numpy as np
+import torch.nn.functional as F
 
 from core.utils import accuracy
 from .meta_model import MetaModel
 from ..backbone.utils import convert_maml_module
 from .maml import MAMLLayer
-
-def softmax(x):
-    e_x = np.exp(x - np.max(x))
-    return e_x / e_x.sum()
 
 class LearningRateLearner(nn.Module):
     def __init__(
@@ -21,15 +17,26 @@ class LearningRateLearner(nn.Module):
         num_layers = 1
     ):
         super(LearningRateLearner, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
         self.lstm = nn.LSTM(
             input_size = input_size, 
             hidden_size = hidden_size,
             num_layers = num_layers
         )
     
+    def init_hidden(self, batch_size):
+        # Initialize hidden and cell states with zeros
+        h_0 = torch.zeros(self.num_layers, batch_size, self.hidden_size).to(self.lstm.weight.device)
+        c_0 = torch.zeros(self.num_layers, batch_size, self.hidden_size).to(self.lstm.weight.device)
+        return (h_0, c_0)
+
     def forward(self, x):
-        out = self.lstm(*x)
-        return out
+        batch_size = x.size(1)  # Assuming x is of shape (seq_len, batch, input_size)
+        hidden = self.init_hidden(batch_size)
+        out, _ = self.lstm(x, hidden)
+        return out[-1]  # Return the last time step's output
 
 class MetaAdam(MetaModel):
     def __init__(self, inner_param,outer_param,feat_dim, **kwargs):
@@ -37,7 +44,7 @@ class MetaAdam(MetaModel):
         self.feat_dim = feat_dim
         self.inner_param = inner_param
         self.outer_param = outer_param
-        self.LearningRateLearner = LearningRateLearner()
+        self.lstm = LearningRateLearner() # cause None grad
         self.loss_func = nn.CrossEntropyLoss()
         self.classifier = MAMLLayer(feat_dim, way_num=self.way_num)
         convert_maml_module(self)
@@ -46,6 +53,14 @@ class MetaAdam(MetaModel):
         out1 = self.emb_func(x)
         out2 = self.classifier(out1)
         return out2
+
+    def freeze_lstm(self):
+        for param in self.lstm.parameters():
+            param.requires_grad = False
+
+    def unfreeze_lstm(self):
+        for param in self.lstm.parameters():
+            param.requires_grad = True
 
     def set_forward(self, batch):
         image, global_target = batch  # unused global_target
@@ -102,7 +117,7 @@ class MetaAdam(MetaModel):
         loss = self.loss_func(output, query_target.contiguous().view(-1))
         
         # update lstm
-        lr_lstm = self.outer_param["lstm_lr"]
+        lr_lstm = torch.tensor(self.outer_param["lstm_lr"], device=self.device)
         lstm_param = self.lstm.parameters()
         lstm_grad = torch.autograd.grad(loss, lstm_param, create_graph=True)
         for k,weight in enumerate(lstm_param):
@@ -116,12 +131,15 @@ class MetaAdam(MetaModel):
     def set_forward_adaptation(self, support_set, support_target):
         # Inner loop
         # "MetaMomentumInner" in paper
-        # TODO:replace for with np matrix
-        lr = self.inner_param["inner_lr"]
-        fast_parameters = list(self.parameters())
-        m = [0 for _ in fast_parameters]
+        # TODO:replace for with torch matrix
+        self.freeze_lstm()
+        
+        lr = torch.tensor(self.inner_param["inner_lr"], device = self.device)
+        fast_parameters = [p for p in self.parameters() if p.requires_grad]
         for parameter in self.parameters():
-            parameter.fast = parameter
+            if parameter.requires_grad:
+                parameter.fast = parameter
+        m = [torch.zeros_like(p) for p in fast_parameters]
         
         self.emb_func.train()
         self.classifier.train()
@@ -137,34 +155,66 @@ class MetaAdam(MetaModel):
             theta_m = []
             theta_g = []
             
+            # for debug
+            '''
+            model_state_dict = self.state_dict()
+            for i,grad in enumerate(grad):
+                if grad is None:
+                    param_name = list(model_state_dict.keys())[i]
+                    print(f"grad for param '{param_name}' is None ")
+            '''
+            k = 0
+            for weight in self.parameters():
+                if weight.requires_grad:
+                    theta_m.append(weight.fast - lr * m[k])
+                    theta_g.append(weight.fast - lr * grad[k])
+                    k += 1
             
-            for k, weight in enumerate(self.parameters()):
-                theta_m.append(weight.fast - lr * m[k])
-                theta_g.append(weight.fast - lr * grad[k])
-            
-            for k, weight in enumerate(self.parameters()):
-                weight.fast = theta_m[k]
+            k = 0
+            for weight in self.parameters():
+                if weight.requires_grad:
+                    weight.fast = theta_m[k]
+                    k += 1
             output_m = self.forward_output(support_set)
             loss_m = self.loss_func(output_m, support_target)
             
-            for k, weight in enumerate(self.parameters()):
-                weight.fast = theta_g[k]
+            
+            k = 0
+            for weight in self.parameters():
+                if weight.requires_grad:
+                    weight.fast = theta_g[k]
+                    k += 1
             output_g = self.forward_output(support_set)
             loss_g = self.loss_func(output_g, support_target)
             
             delta_loss_m = loss_m - loss_fast
             delta_loss_g = loss_g - loss_fast
             
-            tmp = softmax([delta_loss_g,delta_loss_m])
+            tmp = F.softmax(torch.stack([delta_loss_g, delta_loss_m]), dim=0)
             
             eta = []
-            for k, _ in enumerate(theta_m):
-                eta.append(self.lstm(tmp[0] * grad[k], tmp[1] * m[k]))
-                m[k] = tmp[0] * grad[k] + tmp[1] * m[k]
+            for g, m_val in zip(grad, m):
+                input_tensor = torch.stack([tmp[0] * g, tmp[1] * m_val], dim=0).unsqueeze(1)  # Shape (seq_len=2, batch=1, input_size)
+                eta.append(self.lstm(input_tensor))
+
+            m = [tmp[0] * g + tmp[1] * m_val for g, m_val in zip(grad, m)]
             
-            for k,weight in enumerate(self.parameters()):
-                weight.fast = fast_parameters[k] - eta[k] * m[k]
-                fast_parameters[k] = weight.fast
+            #fast_parameters -= eta*m
+            
+            k = 0
+            for weight in self.parameters():
+                if weight.requires_grad:
+                    weight.fast = fast_parameters[k] - eta[k] * m[k]
+                    k += 1
+            
+            fast_parameters = []
+            for weight in self.parameters():
+                if weight.requires_grad:
+                    fast_parameters.append(weight.fast)
+
+            k = 0
+        
+        self.unfreeze_lstm()
         
         return fast_parameters
 
