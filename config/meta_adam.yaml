@@ -13,7 +13,6 @@ train_episode: 500
 test_episode: 600
 
 device_ids: 0
-n_gpu: 1
 epoch: 100
 
 optimizer:
@@ -40,7 +39,9 @@ classifier:
       test_iter: 10
     outer_param:
       lstm_lr: 1e-3
-    feat_dim: 640
+    feat_dim: 800
+
+# because other numbers will cause error: mat1's size is 800*?
 
 
 #backbone:

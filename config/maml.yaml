@@ -12,7 +12,7 @@ episode_size: 2
 train_episode: 2000
 test_episode: 600
 
-device_ids: 5
+device_ids: 0
 n_gpu: 1
 epoch: 100
 
@@ -23,7 +23,7 @@ optimizer:
   other: ~
 
 backbone:
-  name: Conv64F
+  name: Conv32F
   kwargs:
     is_flatten: True
     is_feature: False
@@ -38,7 +38,7 @@ classifier:
       lr: 1e-2
       train_iter: 5
       test_iter: 10
-    feat_dim: 1600
+    feat_dim: 800
 
 
 # backbone:
