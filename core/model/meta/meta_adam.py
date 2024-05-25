@@ -14,7 +14,8 @@ class LearningRateLearner(nn.Module):
         self,
         input_size = 2,
         hidden_size = 20,
-        num_layers = 1
+        num_layers = 1,
+        output_size = 1
     ):
         super(LearningRateLearner, self).__init__()
         self.input_size = input_size
@@ -25,6 +26,9 @@ class LearningRateLearner(nn.Module):
             hidden_size = hidden_size,
             num_layers = num_layers
         )
+        self.fc = nn.Linear(hidden_size, output_size)
+        for name,param in self.lstm.named_parameters():
+            nn.init.uniform_(param,-0.1,0.1)
     
     def init_hidden(self, batch_size):
         # Initialize hidden and cell states with zeros
@@ -32,11 +36,16 @@ class LearningRateLearner(nn.Module):
         c_0 = torch.zeros(self.num_layers, batch_size, self.hidden_size).to(self.lstm.weight.device)
         return (h_0, c_0)
 
-    def forward(self, x):
-        batch_size = x.size(1)  # Assuming x is of shape (seq_len, batch, input_size)
-        hidden = self.init_hidden(batch_size)
-        out, _ = self.lstm(x, hidden)
-        return out[-1]  # Return the last time step's output
+    def forward(self, momentum, new_gradients):
+        inputs = torch.stack((momentum, new_gradients), dim=1)
+        # LSTM expects input of shape (batch, seq_len, features)
+        inputs = inputs.unsqueeze(1)  # Add sequence length dimension
+        lstm_out, _ = self.lstm(inputs)
+        # Only take the output from the final time step
+        lstm_out = lstm_out[:, -1, :]
+        # Pass through a fully connected layer to get the adaptive learning rate
+        adaptive_lr = self.fc(lstm_out)
+        return adaptive_lr
 
 class MetaAdam(MetaModel):
     def __init__(self, inner_param,outer_param,feat_dim, **kwargs):
@@ -60,6 +69,15 @@ class MetaAdam(MetaModel):
 
     def unfreeze_lstm(self):
         for param in self.lstm.parameters():
+            param.requires_grad = True
+    
+    def freeze_backbone(self):
+        for name, param in self.named_parameters():
+            if "lstm" not in name:
+                param.requires_grad = False
+
+    def unfreeze_all_parameters(self):
+        for param in self.parameters():
             param.requires_grad = True
 
     def set_forward(self, batch):
@@ -117,11 +135,14 @@ class MetaAdam(MetaModel):
         loss = self.loss_func(output, query_target.contiguous().view(-1))
         
         # update lstm
+        self.freeze_backbone()
         lr_lstm = torch.tensor(self.outer_param["lstm_lr"], device=self.device)
         lstm_param = self.lstm.parameters()
         lstm_grad = torch.autograd.grad(loss, lstm_param, create_graph=True)
         for k,weight in enumerate(lstm_param):
             weight.data = weight.data - lr_lstm * lstm_grad[k].data
+        
+        self.unfreeze_all_parameters()
         
         acc = accuracy(output, query_target.contiguous().view(-1))
         
@@ -194,8 +215,11 @@ class MetaAdam(MetaModel):
             
             eta = []
             for g, m_val in zip(grad, m):
-                input_tensor = torch.stack([tmp[0] * g, tmp[1] * m_val], dim=0).unsqueeze(1)  # Shape (seq_len=2, batch=1, input_size)
-                eta.append(self.lstm(input_tensor))
+                #input_tensor = torch.stack([tmp[0] * g, tmp[1] * m_val], dim=0).unsqueeze(1)  # Shape (seq_len=2, batch=1, input_size)
+                g_flat = g.view(-1)
+                m_val_flat = m_val.view(-1)
+                eta_flat = self.lstm(tmp[1] * m_val_flat, tmp[0] * g_flat)
+                eta.append(eta_flat.view_as(g))
 
             m = [tmp[0] * g + tmp[1] * m_val for g, m_val in zip(grad, m)]
             
