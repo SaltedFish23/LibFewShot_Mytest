@@ -132,22 +132,41 @@ class MetaAdam(MetaModel):
             output_list.append(output)
 
         output = torch.cat(output_list, dim=0)
-        loss = self.loss_func(output, query_target.contiguous().view(-1))
+        
+        # dynamic weighting schema
+        query_target = query_target.view(-1)
+        class_losses = []
+        for class_idx in range(self.way_num):
+            class_mask = query_target == class_idx
+            if class_mask.any():
+                class_output = output[class_mask] 
+                class_target = query_target[class_mask]
+                class_loss = self.loss_func(class_output, class_target)
+                class_losses.append(class_loss)
+            else:
+                class_losses.append(torch.tensor(0.0, device=self.device))
+        
+        # Compute softmax weights for the class losses
+        class_losses_tensor = torch.stack(class_losses)
+        weights = F.softmax(class_losses_tensor, dim=0)
+        
+        # Compute final loss as weighted sum of class losses
+        final_loss = torch.sum(weights * class_losses_tensor)
         
         # update lstm
-        self.freeze_backbone()
+        # self.freeze_backbone()
         lr_lstm = torch.tensor(self.outer_param["lstm_lr"], device=self.device)
         lstm_param = self.lstm.parameters()
-        lstm_grad = torch.autograd.grad(loss, lstm_param, create_graph=True)
+        lstm_grad = torch.autograd.grad(final_loss, lstm_param, create_graph=True)
         for k,weight in enumerate(lstm_param):
             weight.data = weight.data - lr_lstm * lstm_grad[k].data
         
-        self.unfreeze_all_parameters()
+        # self.unfreeze_all_parameters()
         
         acc = accuracy(output, query_target.contiguous().view(-1))
         
         
-        return output, acc, loss
+        return output, acc, final_loss
     
     def set_forward_adaptation(self, support_set, support_target):
         # Inner loop
