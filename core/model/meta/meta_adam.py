@@ -9,6 +9,13 @@ from .meta_model import MetaModel
 from ..backbone.utils import convert_maml_module
 from .maml import MAMLLayer
 
+from memory_profiler import profile
+from torchviz import make_dot
+
+''' for debug
+def print_grad(grad):
+    print(grad)'''
+
 class LearningRateLearner(nn.Module):
     def __init__(
         self,
@@ -48,6 +55,7 @@ class LearningRateLearner(nn.Module):
         return adaptive_lr
 
 class MetaAdam(MetaModel):
+    # TODO: fix memory leakage
     def __init__(self, inner_param,outer_param,feat_dim, **kwargs):
         super(MetaAdam, self).__init__(**kwargs)
         self.feat_dim = feat_dim
@@ -107,6 +115,7 @@ class MetaAdam(MetaModel):
         acc = accuracy(output, query_target.contiguous().view(-1))
         return output, acc
 
+    #@profile(precision=4,stream=open("mem_profiler_loss.log","w+"))
     def set_forward_loss(self, batch):
         # Outer loop, return output acc loss
         image, global_target = batch  # unused global_target
@@ -154,35 +163,52 @@ class MetaAdam(MetaModel):
         final_loss = torch.sum(weights * class_losses_tensor)
         
         # update lstm
-        # self.freeze_backbone()
+        #self.freeze_backbone()
         lr_lstm = torch.tensor(self.outer_param["lstm_lr"], device=self.device)
         lstm_param = self.lstm.parameters()
-        lstm_grad = torch.autograd.grad(final_loss, lstm_param, create_graph=True)
+        lstm_grad = torch.autograd.grad(final_loss, lstm_param, create_graph=True, allow_unused=True)
+        
+        # for debug
+        '''
+        model_state_dict = self.lstm.state_dict()
+        for i,grad in enumerate(lstm_grad):
+            if grad is None:
+                param_name = list(model_state_dict.keys())[i]
+                print(f"grad for param '{param_name}' is None ")
+            else:
+                param_name = list(model_state_dict.keys())[i]
+                print(f"grad for param '{param_name}' is not None ")
+        '''
+        
         for k,weight in enumerate(lstm_param):
             weight.data = weight.data - lr_lstm * lstm_grad[k].data
         
-        # self.unfreeze_all_parameters()
+        #self.unfreeze_all_parameters()
         
         acc = accuracy(output, query_target.contiguous().view(-1))
         
         
         return output, acc, final_loss
     
+    #@profile(precision=4,stream=open("mem_profiler.log","w+"))
     def set_forward_adaptation(self, support_set, support_target):
         # Inner loop
         # "MetaMomentumInner" in paper
         # TODO:replace for with torch matrix
-        self.freeze_lstm()
+        # self.freeze_lstm()
+        backbone = [self.emb_func, self.classifier]
         
         lr = torch.tensor(self.inner_param["inner_lr"], device = self.device)
-        fast_parameters = [p for p in self.parameters() if p.requires_grad]
+        fast_parameters = [p for module in backbone for p in module.parameters()]
         for parameter in self.parameters():
-            if parameter.requires_grad:
-                parameter.fast = parameter
+            parameter.fast = parameter
         m = [torch.zeros_like(p) for p in fast_parameters]
+        
+        # self.unfreeze_lstm()
         
         self.emb_func.train()
         self.classifier.train()
+        
         for t in range(
             self.inner_param["train_iter"]
             if self.training 
@@ -191,6 +217,7 @@ class MetaAdam(MetaModel):
             output = self.forward_output(support_set)
             loss_fast = self.loss_func(output,support_target)
             grad = torch.autograd.grad(loss_fast, fast_parameters, create_graph=True)
+            
             #fast_parameters = []
             theta_m = []
             theta_g = []
@@ -202,33 +229,39 @@ class MetaAdam(MetaModel):
                 if grad is None:
                     param_name = list(model_state_dict.keys())[i]
                     print(f"grad for param '{param_name}' is None ")
+                else:
+                    param_name = list(model_state_dict.keys())[i]
+                    print(f"grad for param '{param_name}' is not None ")
             '''
             k = 0
-            for weight in self.parameters():
-                if weight.requires_grad:
+            for module in backbone:
+                for weight in module.parameters():
                     theta_m.append(weight.fast - lr * m[k])
                     theta_g.append(weight.fast - lr * grad[k])
                     k += 1
             
             k = 0
-            for weight in self.parameters():
-                if weight.requires_grad:
-                    weight.fast = theta_m[k]
-                    k += 1
+            for module in backbone:
+                with torch.no_grad():
+                    for weight in module.parameters():
+                        weight.fast = theta_m[k]
+                        k += 1
+
             output_m = self.forward_output(support_set)
             loss_m = self.loss_func(output_m, support_target)
             
-            
             k = 0
-            for weight in self.parameters():
-                if weight.requires_grad:
-                    weight.fast = theta_g[k]
-                    k += 1
+            for module in backbone:
+                with torch.no_grad():
+                    for weight in module.parameters():
+                        weight.fast = theta_g[k]
+                        k += 1
+
             output_g = self.forward_output(support_set)
             loss_g = self.loss_func(output_g, support_target)
             
-            delta_loss_m = loss_m - loss_fast
-            delta_loss_g = loss_g - loss_fast
+            delta_loss_m = torch.tensor(loss_m.item() - loss_fast.item(), device = self.device)
+            delta_loss_g = torch.tensor(loss_g.item() - loss_fast.item(), device = self.device)
             
             tmp = F.softmax(torch.stack([delta_loss_g, delta_loss_m]), dim=0)
             
@@ -245,20 +278,16 @@ class MetaAdam(MetaModel):
             #fast_parameters -= eta*m
             
             k = 0
-            for weight in self.parameters():
-                if weight.requires_grad:
+            for module in backbone:
+                for weight in module.parameters():
                     weight.fast = fast_parameters[k] - eta[k] * m[k]
                     k += 1
             
             fast_parameters = []
-            for weight in self.parameters():
-                if weight.requires_grad:
+            for module in backbone:
+                for weight in module.parameters():
                     fast_parameters.append(weight.fast)
 
             k = 0
         
-        self.unfreeze_lstm()
-        
         return fast_parameters
-
-    
