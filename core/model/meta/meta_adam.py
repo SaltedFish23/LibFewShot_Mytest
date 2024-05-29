@@ -115,7 +115,7 @@ class MetaAdam(MetaModel):
         acc = accuracy(output, query_target.contiguous().view(-1))
         return output, acc
 
-    #@profile(precision=4,stream=open("mem_profiler_loss.log","w+"))
+    # @profile(precision=4,stream=open("mem_profiler_loss.log","w+"))
     def set_forward_loss(self, batch):
         # Outer loop, return output acc loss
         image, global_target = batch  # unused global_target
@@ -129,6 +129,7 @@ class MetaAdam(MetaModel):
         episode_size, _, c, h, w = support_image.size()
 
         output_list = []
+        self.unfreeze_lstm()
         for i in range(episode_size):
             episode_support_image = support_image[i].contiguous().reshape(-1, c, h, w)
             episode_query_image = query_image[i].contiguous().reshape(-1, c, h, w)
@@ -166,7 +167,7 @@ class MetaAdam(MetaModel):
         #self.freeze_backbone()
         lr_lstm = torch.tensor(self.outer_param["lstm_lr"], device=self.device)
         lstm_param = self.lstm.parameters()
-        lstm_grad = torch.autograd.grad(final_loss, lstm_param, create_graph=True, allow_unused=True)
+        lstm_grad = torch.autograd.grad(final_loss, lstm_param)
         
         # for debug
         '''
@@ -182,7 +183,7 @@ class MetaAdam(MetaModel):
         
         for k,weight in enumerate(lstm_param):
             weight.data = weight.data - lr_lstm * lstm_grad[k].data
-        
+        self.freeze_lstm()
         #self.unfreeze_all_parameters()
         
         acc = accuracy(output, query_target.contiguous().view(-1))
@@ -190,7 +191,7 @@ class MetaAdam(MetaModel):
         
         return output, acc, final_loss
     
-    #@profile(precision=4,stream=open("mem_profiler.log","w+"))
+    # @profile(precision=4,stream=open("mem_profiler_adaption2.log","w+"))
     def set_forward_adaptation(self, support_set, support_target):
         # Inner loop
         # "MetaMomentumInner" in paper
@@ -272,9 +273,10 @@ class MetaAdam(MetaModel):
                     m_val_flat = m_val.view(-1)
                     eta_flat = self.lstm(tmp[1] * m_val_flat, tmp[0] * g_flat)
                     eta.append(eta_flat.view_as(g))
-
-            m = [tmp[0] * g + tmp[1] * m_val for g, m_val in zip(grad, m)]
             
+            with torch.no_grad():
+                m = [tmp[0] * g + tmp[1] * m_val for g, m_val in zip(grad, m)]
+
             #fast_parameters -= eta*m
             
             k = 0
