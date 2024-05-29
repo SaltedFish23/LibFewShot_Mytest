@@ -218,60 +218,60 @@ class MetaAdam(MetaModel):
             loss_fast = self.loss_func(output,support_target)
             grad = torch.autograd.grad(loss_fast, fast_parameters, create_graph=True)
             
-            #fast_parameters = []
-            theta_m = []
-            theta_g = []
-            
-            # for debug
-            '''
-            model_state_dict = self.state_dict()
-            for i,grad in enumerate(grad):
-                if grad is None:
-                    param_name = list(model_state_dict.keys())[i]
-                    print(f"grad for param '{param_name}' is None ")
-                else:
-                    param_name = list(model_state_dict.keys())[i]
-                    print(f"grad for param '{param_name}' is not None ")
-            '''
-            k = 0
-            for module in backbone:
-                for weight in module.parameters():
-                    theta_m.append(weight.fast - lr * m[k])
-                    theta_g.append(weight.fast - lr * grad[k])
-                    k += 1
-            
-            k = 0
-            for module in backbone:
-                with torch.no_grad():
+            with torch.no_grad():
+                #fast_parameters = []
+                theta_m = []
+                theta_g = []
+                
+                # for debug
+                '''
+                model_state_dict = self.state_dict()
+                for i,grad in enumerate(grad):
+                    if grad is None:
+                        param_name = list(model_state_dict.keys())[i]
+                        print(f"grad for param '{param_name}' is None ")
+                    else:
+                        param_name = list(model_state_dict.keys())[i]
+                        print(f"grad for param '{param_name}' is not None ")
+                '''
+                k = 0
+                for module in backbone:
+                    for weight in module.parameters():
+                        theta_m.append(weight.fast - lr * m[k])
+                        theta_g.append(weight.fast - lr * grad[k])
+                        k += 1
+                
+                k = 0
+                for module in backbone:
                     for weight in module.parameters():
                         weight.fast = theta_m[k]
                         k += 1
 
-            output_m = self.forward_output(support_set)
-            loss_m = self.loss_func(output_m, support_target)
-            
-            k = 0
-            for module in backbone:
-                with torch.no_grad():
+                output_m = self.forward_output(support_set)
+                loss_m = self.loss_func(output_m, support_target)
+                
+                k = 0
+                for module in backbone:
                     for weight in module.parameters():
                         weight.fast = theta_g[k]
                         k += 1
 
-            output_g = self.forward_output(support_set)
-            loss_g = self.loss_func(output_g, support_target)
+                output_g = self.forward_output(support_set)
+                loss_g = self.loss_func(output_g, support_target)
+                
+                delta_loss_m = torch.tensor(loss_m.item() - loss_fast.item(), device = self.device)
+                delta_loss_g = torch.tensor(loss_g.item() - loss_fast.item(), device = self.device)
+                
+                tmp = F.softmax(torch.stack([delta_loss_g, delta_loss_m]), dim=0)
             
-            delta_loss_m = torch.tensor(loss_m.item() - loss_fast.item(), device = self.device)
-            delta_loss_g = torch.tensor(loss_g.item() - loss_fast.item(), device = self.device)
-            
-            tmp = F.softmax(torch.stack([delta_loss_g, delta_loss_m]), dim=0)
-            
-            eta = []
-            for g, m_val in zip(grad, m):
-                #input_tensor = torch.stack([tmp[0] * g, tmp[1] * m_val], dim=0).unsqueeze(1)  # Shape (seq_len=2, batch=1, input_size)
-                g_flat = g.view(-1)
-                m_val_flat = m_val.view(-1)
-                eta_flat = self.lstm(tmp[1] * m_val_flat, tmp[0] * g_flat)
-                eta.append(eta_flat.view_as(g))
+            with torch.enable_grad():
+                eta = []
+                for g, m_val in zip(grad, m):
+                    #input_tensor = torch.stack([tmp[0] * g, tmp[1] * m_val], dim=0).unsqueeze(1)  # Shape (seq_len=2, batch=1, input_size)
+                    g_flat = g.view(-1)
+                    m_val_flat = m_val.view(-1)
+                    eta_flat = self.lstm(tmp[1] * m_val_flat, tmp[0] * g_flat)
+                    eta.append(eta_flat.view_as(g))
 
             m = [tmp[0] * g + tmp[1] * m_val for g, m_val in zip(grad, m)]
             
@@ -290,4 +290,5 @@ class MetaAdam(MetaModel):
 
             k = 0
         
+        torch.cuda.empty_cache()
         return fast_parameters
