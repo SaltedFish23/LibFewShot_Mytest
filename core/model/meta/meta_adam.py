@@ -41,8 +41,8 @@ class LearningRateLearner(nn.Module):
     
     def init_hidden(self, batch_size):
         # Initialize hidden and cell states with zeros
-        h_0 = torch.zeros(self.num_layers, batch_size, self.hidden_size).to(self.lstm.weight.device)
-        c_0 = torch.zeros(self.num_layers, batch_size, self.hidden_size).to(self.lstm.weight.device)
+        h_0 = torch.zeros(self.num_layers, batch_size, self.hidden_size)
+        c_0 = torch.zeros(self.num_layers, batch_size, self.hidden_size)
         return (h_0, c_0)
 
     def forward(self, momentum, new_gradients):
@@ -172,7 +172,7 @@ class MetaAdam(MetaModel):
         #self.freeze_backbone()
         lr_lstm = torch.tensor(self.outer_param["lstm_lr"], device=self.device)
         lstm_param = list(self.lstm.parameters())
-        lstm_grad = torch.autograd.grad(final_loss, lstm_param, retain_graph=True, allow_unused=True) # One of the differentiated Tensors appears to not have been used in the graph.
+        lstm_grad = torch.autograd.grad(final_loss, lstm_param, create_graph=True) 
         
         # for debug
         '''
@@ -257,7 +257,7 @@ class MetaAdam(MetaModel):
                         k += 1
 
                 output_m = self.forward_output(support_set)
-            loss_m = self.loss_func(output_m, support_target)
+                loss_m = self.loss_func(output_m, support_target)
                 
             with torch.no_grad():
                 k = 0
@@ -267,7 +267,7 @@ class MetaAdam(MetaModel):
                         k += 1
 
                 output_g = self.forward_output(support_set)
-            loss_g = self.loss_func(output_g, support_target)
+                loss_g = self.loss_func(output_g, support_target)
             
             with torch.no_grad():
                 k = 0
@@ -276,19 +276,20 @@ class MetaAdam(MetaModel):
                         weight.fast = fast_parameters[k]
                         k += 1
             
-            delta_loss_m = torch.tensor(loss_m.item() - loss_fast.item(), device = self.device)
-            delta_loss_g = torch.tensor(loss_g.item() - loss_fast.item(), device = self.device)
+            delta_loss_m = torch.tensor(loss_m.item() - loss_fast.item(), device = self.device, requires_grad=True)
+            delta_loss_g = torch.tensor(loss_g.item() - loss_fast.item(), device = self.device, requires_grad=True)
             
             tmp = F.softmax(torch.stack([delta_loss_g, delta_loss_m]), dim=0)
             
-            with torch.enable_grad():
-                eta = []
-                for g, m_val in zip(grad, m):
-                    #input_tensor = torch.stack([tmp[0] * g, tmp[1] * m_val], dim=0).unsqueeze(1)  # Shape (seq_len=2, batch=1, input_size)
-                    g_flat = g.view(-1)
-                    m_val_flat = m_val.view(-1)
-                    eta_flat = self.lstm(tmp[1] * m_val_flat, tmp[0] * g_flat)
-                    eta.append(eta_flat.view_as(g))
+            # with torch.enable_grad():
+            eta = []
+            for g, m_val in zip(grad, m):
+                #input_tensor = torch.stack([tmp[0] * g, tmp[1] * m_val], dim=0).unsqueeze(1)  # Shape (seq_len=2, batch=1, input_size)
+                g_flat = g.view(-1)
+                m_val_flat = m_val.view(-1)
+                init_hidden = self.lstm.init_hidden(len(g_flat))
+                eta_flat = self.lstm(tmp[1] * m_val_flat, tmp[0] * g_flat)
+                eta.append(eta_flat.view_as(g))
             
             # with torch.no_grad():
             m = [tmp[0] * g + tmp[1] * m_val for g, m_val in zip(grad, m)]
@@ -299,7 +300,7 @@ class MetaAdam(MetaModel):
             fast_parameters = []
             for module in backbone:
                 for weight in module.parameters():
-                    weight.fast = weight.fast - lr * grad[k]
+                    weight.fast = weight.fast - eta[k] * grad[k]
                     k += 1
                     fast_parameters.append(weight.fast)
 
@@ -312,5 +313,4 @@ class MetaAdam(MetaModel):
             # gc.collect()
             # tr.print_diff()
         
-        #print("exit adaption")
         return fast_parameters

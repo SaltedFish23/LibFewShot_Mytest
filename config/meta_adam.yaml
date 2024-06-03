@@ -10,14 +10,14 @@ shot_num: 1
 query_num: 15
 episode_size: 2
 train_episode: 500
-test_episode: 600
+test_episode: 100
 
 device_ids: 0
 n_gpu: 1
 epoch: 100
 
 optimizer:
-  name: Adam
+  name: SGD
   kwargs:
     lr: 1e-3
   other: ~
@@ -42,8 +42,9 @@ classifier:
       lstm_lr: 1e-3
     feat_dim: 800
 
-data_loader_num: 1
+data_loader_num: 4
 ues_memory: false
+batch_size: 2
 
 # because other numbers will cause error: mat1's size is 800*?
 
