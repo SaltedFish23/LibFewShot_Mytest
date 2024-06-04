@@ -149,7 +149,7 @@ class MetaAdam(MetaModel):
         output = torch.cat(output_list, dim=0)
         
         # dynamic weighting schema
-        
+        temperature = torch.tensor(self.inner_param["temperature"], device = self.device)
         query_target = query_target.view(-1)
         class_losses = []
         for class_idx in range(self.way_num):
@@ -163,7 +163,7 @@ class MetaAdam(MetaModel):
                 class_losses.append(torch.tensor(0.0, device=self.device))
         # Compute softmax weights for the class losses
         class_losses_tensor = torch.stack(class_losses)
-        weights = F.softmax(class_losses_tensor, dim=0)
+        weights = F.softmax(class_losses_tensor / temperature, dim=0)
         # Compute final loss as weighted sum of class losses
         final_loss = torch.sum(weights * class_losses_tensor)
         # final_loss = self.loss_func(output, query_target.contiguous().view(-1))
