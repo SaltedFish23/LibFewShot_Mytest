@@ -1,0 +1,52 @@
+includes:
+  - headers/data.yaml
+  - headers/device.yaml
+  - headers/misc.yaml
+  - headers/model.yaml
+  - headers/optimizer.yaml
+
+way_num: 5
+shot_num: 1
+query_num: 15
+episode_size: 2
+train_episode: 500
+test_episode: 100
+
+device_ids: 0
+n_gpu: 1
+epoch: 100
+
+optimizer:
+  name: Adam
+  kwargs:
+    lr: 1e-3
+  other: ~
+
+backbone:
+  name: Conv64F
+  kwargs:
+    is_flatten: True
+    is_feature: False
+    leaky_relu: False
+    negative_slope: 0.2
+    last_pool: True
+
+classifier:
+  name: MetaAdam4
+  kwargs:
+    inner_param:
+      inner_lr: 1e-2
+      train_iter: 5
+      test_iter: 10
+    outer_param:
+      lstm_lr: 1e-3
+      temperature: 2
+    #feat_dim: 800 #conv32
+    feat_dim: 1600 # conv64
+
+data_loader_num: 12
+ues_memory: yes
+batch_size: 2
+
+result_root: /root/tf-logs
+data_root: /root/autodl-tmp/miniImageNet--ravi

@@ -17,13 +17,13 @@ n_gpu: 1
 epoch: 100
 
 optimizer:
-  name: SGD
+  name: Adam
   kwargs:
     lr: 1e-3
   other: ~
 
 backbone:
-  name: Conv32F
+  name: Conv64F
   kwargs:
     is_flatten: True
     is_feature: False
@@ -38,8 +38,14 @@ classifier:
       lr: 1e-2
       train_iter: 5
       test_iter: 10
-    feat_dim: 800
+    feat_dim: 1600
 
+data_loader_num: 12
+ues_memory: yes
+batch_size: 2
+
+result_root: /root/tf-logs
+data_root: /root/autodl-tmp/miniImageNet--ravi
 
 # backbone:
 #   name: resnet12
